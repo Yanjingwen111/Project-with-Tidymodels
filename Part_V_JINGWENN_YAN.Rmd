@@ -1,0 +1,413 @@
+---
+title: "INFSCI 2595 Final Project: Read data"
+subtitle: "Example: save and reload a model object"
+author: "Jingwen Yan"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r, load_packages,warning=FALSE}
+library(tidyverse)
+```
+
+## Overview
+
+This RMarkdown shows how to download the final project data. It shows how to select the variables for the regression and classification portions of the final project. It also demonstrates how to fit a simple model (with `lm()`), save that model, and load it back into the workspace. You may find these actions helpful as you work through the project.  
+
+## Final project data
+
+The code chunk below reads in the data for the final project.  
+
+```{r, read_glimpse_data}
+data_url <- 'https://raw.githubusercontent.com/jyurko/INFSCI_2595_Fall_2020/master/HW/final_project/infsci_2595_final_project_data.csv'
+
+df <- readr::read_csv(data_url, col_names = TRUE)
+```
+
+Get a glimpse of the data.  
+
+```{r, check_glimpse,warning=FALSE}
+df %>% glimpse()
+```
+
+Separate the variables associated with Step 1.  
+
+```{r, make_step_1_data}
+step_1_df <- df %>% select(xA, xB, x01:x06, response_1)
+```
+
+Separate the variables associated with the Option B classification formulation. Notice that the `outcome_2` variable is converted to a factor with a specific ordering of the levels. Use this ordering when modeling in `caret` to make sure everyone predicts the `Fail` class as the "positive" class in the confusion matrix.  
+
+```{r, make_step_2_option_b_data}
+step_2_b_df <- df %>% select(xA, xB, response_1, x07:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+Separate the variables associated with the Option A classification formulation. The `outcome_2` variable is again converted to a factor with a specific ordering of the levels.  
+
+```{r, make_step_2_option_a_data}
+step_2_a_df <- df %>% select(xA, xB, x01:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+# read best models of step_a_df and step_b_df
+
+```{r,warning=FALSE}
+library(tidymodels)
+```
+
+```{r,warning=FALSE}
+library(Metrics)
+```
+
+```{r,warning=FALSE}
+boost_b <- readr::read_rds("xgboost_b.rds")
+```
+
+```{r,warning=FALSE}
+collect_metrics(boost_b)
+```
+
+```{r,warning=FALSE}
+boost_a <- readr::read_rds("xgboost_a.rds")
+```
+
+```{r,warning=FALSE}
+collect_metrics(boost_a)
+```
+According to the roc_auc, not including response_1 has better performance. 
+
+## most important variables
+
+```{r,warning=FALSE}
+library(vip)
+```
+
+
+```{r,warning=FALSE}
+boost_a %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip(num_features = 20)
+```
+
+```{r,warning=FALSE}
+boost_b %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip(num_features = 20)
+```
+## Visualize the probability of failure as a function of your identified most important variables.
+
+```{r,warning=FALSE}
+pred_a <- boost_a%>% 
+  collect_predictions()
+pred_a
+```
+
+```{r,warning=FALSE}
+pred_b <- boost_b%>% 
+  collect_predictions()
+pred_b
+```
+
+
+```{r,warning=FALSE}
+pred_a %>% 
+  conf_mat(outcome_2, .pred_class) %>%
+  pluck(1) %>%
+  as_tibble() %>%
+  ggplot(aes(Prediction, Truth, alpha = n)) +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = n), colour = "white", alpha = 1, size = 8) +
+  theme(panel.grid.major = element_blank()) +
+  labs(
+    y = "Actual Position",
+    x = "Predicted Position",
+    fill = NULL,
+    title = "Confusion Matrix_boost_a"
+  )
+```
+
+
+```{r,warning=FALSE}
+pred_b %>% 
+  conf_mat(outcome_2, .pred_class) %>%
+  pluck(1) %>%
+  as_tibble() %>%
+  ggplot(aes(Prediction, Truth, alpha = n)) +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = n), colour = "white", alpha = 1, size = 8) +
+  theme(panel.grid.major = element_blank()) +
+  labs(
+    y = "Actual Position",
+    x = "Predicted Position",
+    fill = NULL,
+    title = "Confusion Matrix boost_b"
+  )
+```
+
+## virtualize the posibility of failure.
+
+```{r,warning=FALSE}
+library(mlbench)
+library(caret)
+library(corrplot)
+library(plotROC)
+library(xgboost)
+```
+
+
+```{r,warning=FALSE}
+set.seed(123)
+data_split_b <- initial_split(step_2_b_df, prop = 0.8)
+
+train_data_b <- training(data_split_b)
+test_data_b  <- testing(data_split_b)
+```
+
+```{r,warning=FALSE}
+ctrl <- trainControl(method = "cv", number = 10,
+                             summaryFunction = twoClassSummary,
+                             classProbs = TRUE,
+                             savePredictions = TRUE)
+```
+
+
+```{r,warning=FALSE}
+ctrl <- trainControl(method = "cv", number = 10,
+                             summaryFunction = twoClassSummary,
+                             classProbs = TRUE,
+                             savePredictions = TRUE)
+
+
+boost_b_roc <- train( outcome_2 ~ ., data = train_data_b,
+               method = "xgbTree",
+               metric = "ROC",
+               trControl = ctrl
+               )
+```
+
+```{r}
+set.seed(123)
+data_split_a <- initial_split(step_2_a_df, prop = 0.8)
+
+train_data_a <- training(data_split_a)
+test_data_a  <- testing(data_split_a)
+```
+
+
+```{r,warning=FALSE}
+boost_a_roc <- train( outcome_2 ~ ., data = train_data_a,
+               method = "xgbTree",
+               metric = "ROC",
+               trControl = ctrl
+               )
+```
+
+```{r,warning=FALSE}
+grid <- function(var_name, top_input_names, all_data)
+{
+  
+  xvar <- all_data %>% select(var_name) %>% pull()
+  
+  if (var_name %in% top_input_names[1:2]){
+    xgrid <- seq(min(xvar), max(xvar), length.out = 20)
+  } 
+  else {
+    
+    xgrid <- median(xvar, na.rm = TRUE)
+  }
+  
+  return(xgrid)
+}
+```
+
+
+```{r,warning=FALSE}
+all_input_b <- step_2_b_df[,1:8] %>% names()
+top <- c("x07", "x08")
+input_b <- purrr::map(all_of(all_input_b),
+                              grid,
+                              top_input_names = top,
+                              all_data = step_2_b_df)
+
+input_grid_b <- expand.grid(input_b,
+                            KEEP.OUT.ATTRS = FALSE,
+                            stringsAsFactors = FALSE) %>% 
+  purrr::set_names(all_input_b)
+
+```
+
+
+```{r,warning=FALSE}
+boost_b_roc_pred <- predict(boost_b_roc, input_grid_b, type="prob")
+input_grid_b %>% 
+  bind_cols(boost_b_roc_pred) %>%
+  ggplot(mapping = aes(x = x07, y = x08)) +
+  geom_raster(mapping = aes(fill = Fail)) +
+  scale_fill_viridis_b() +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+
+```{r,warning=FALSE}
+grid <- function(var_name, top_input_names, all_data)
+{
+  
+  xvar <- all_data %>% select(var_name) %>% pull()
+  
+  if (var_name %in% top_input_names[1:2]){
+    xgrid <- seq(min(xvar), max(xvar), length.out = 20)
+  } 
+  else {
+    
+    xgrid <- median(xvar, na.rm = TRUE)
+  }
+  
+  return(xgrid)
+}
+```
+
+
+```{r,warning=FALSE}
+all_input_a <- step_2_a_df[,1:13] %>% names()
+top <- c("x07", "x08")
+input_a <- purrr::map(all_of(all_of(all_input_a)),
+                              grid,
+                              top_input_names = top,
+                              all_data = step_2_a_df)
+
+input_grid_a <- expand.grid(input_a,
+                            KEEP.OUT.ATTRS = FALSE,
+                            stringsAsFactors = FALSE) %>% 
+  purrr::set_names(all_input_a)
+
+```
+
+
+```{r,warning=FALSE}
+boost_a_roc_pred <- predict(boost_a_roc, input_grid_a, type="prob")
+input_grid_a %>% 
+  bind_cols(boost_a_roc_pred) %>%
+  ggplot(mapping = aes(x = x07, y = x08)) +
+  geom_raster(mapping = aes(fill = Fail)) +
+  scale_fill_viridis_b() +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+Based on failure distribution as two pictures shown above,step_a_df which is input setting with response_1 is better. Because the fail area is smaller.
+
+## discret
+
+```{r,warning=FALSE}
+grid_dis <- function(var_name, top_input_names, all_data)
+{
+  
+  xvar <- all_data %>% select(var_name) %>% pull()
+  
+  if (var_name %in% top_input_names[1:2]){
+    xgrid <- seq(min(xvar), max(xvar), length.out = 20)
+  } 
+  
+  else if (var_name %in% c("xA")){
+    xgrid <- xvar
+  }
+  
+  else {
+    
+    xgrid <- median(xvar, na.rm = TRUE)
+  }
+  
+  return(xgrid)
+}
+```
+
+
+```{r,warning=FALSE}
+all_input_b_dis <- step_2_b_df[,1:8] %>% names()
+
+input_b_dis <- purrr::map(all_of(all_input_b_dis),
+                              grid_dis,
+                              top_input_names = top,
+                              all_data = step_2_b_df)
+
+input_grid_b_dis <- expand.grid(input_b_dis,
+                            KEEP.OUT.ATTRS = FALSE,
+                            stringsAsFactors = FALSE) %>% 
+  purrr::set_names(all_input_b_dis)
+
+```
+
+
+```{r,warning=FALSE}
+boost_b_roc_pred_dis <- predict(boost_b_roc, input_grid_b_dis, type="prob")
+input_grid_b_dis %>% 
+  bind_cols(boost_b_roc_pred_dis) %>%
+  ggplot(mapping = aes(x = x07, y = x08)) +
+  geom_raster(mapping = aes(fill = Fail)) +
+  scale_fill_viridis_b() +
+  theme_bw() +
+  theme(legend.position = "bottom")+
+  facet_grid(xA~xB, labeller = "label_both")
+```
+
+```{r,warning=FALSE}
+grid_dis_xB <- function(var_name, top_input_names, all_data)
+{
+  
+  xvar <- all_data %>% select(var_name) %>% pull()
+  
+  if (var_name %in% top_input_names[1:2]){
+    xgrid <- seq(min(xvar), max(xvar), length.out = 20)
+  } 
+  
+  else if (var_name %in% c("xB")){
+    xgrid <- xvar
+  }
+  
+  else {
+    
+    xgrid <- median(xvar, na.rm = TRUE)
+  }
+  
+  return(xgrid)
+}
+```
+
+
+```{r,warning=FALSE}
+all_input_b_dis <- step_2_b_df[,1:8] %>% names()
+
+input_b_dis <- purrr::map(all_of(all_input_b_dis),
+                              grid_dis_xB,
+                              top_input_names = top,
+                              all_data = step_2_b_df)
+
+input_grid_b_dis <- expand.grid(input_b_dis,
+                            KEEP.OUT.ATTRS = FALSE,
+                            stringsAsFactors = FALSE) %>% 
+  purrr::set_names(all_input_b_dis)
+
+```
+
+
+```{r,warning=FALSE}
+boost_b_roc_pred_dis <- predict(boost_b_roc, input_grid_b_dis, type="prob")
+input_grid_b_dis %>% 
+  bind_cols(boost_b_roc_pred_dis) %>%
+  ggplot(mapping = aes(x = x07, y = x08)) +
+  geom_raster(mapping = aes(fill = Fail)) +
+  scale_fill_viridis_b() +
+  theme_bw() +
+  theme(legend.position = "bottom")+
+  facet_grid(xA~xB, labeller = "label_both")
+```
+
+They are not vary too much. According to pictures, the area of specific x07 and x08 has higher fail possibility.

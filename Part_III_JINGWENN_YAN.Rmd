@@ -1,0 +1,994 @@
+---
+title: "INFSCI 2595 Final Project: Read data"
+subtitle: "Example: save and reload a model object"
+author: "Jingwen Yan"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r, load_packages}
+library(tidyverse)
+```
+
+## Overview
+
+This RMarkdown shows how to download the final project data. It shows how to select the variables for the regression and classification portions of the final project. It also demonstrates how to fit a simple model (with `lm()`), save that model, and load it back into the workspace. You may find these actions helpful as you work through the project.  
+
+## Final project data
+
+The code chunk below reads in the data for the final project.  
+
+```{r, read_glimpse_data}
+data_url <- 'https://raw.githubusercontent.com/jyurko/INFSCI_2595_Fall_2020/master/HW/final_project/infsci_2595_final_project_data.csv'
+
+df <- readr::read_csv(data_url, col_names = TRUE)
+```
+
+Get a glimpse of the data.  
+
+```{r, check_glimpse}
+df %>% glimpse()
+```
+
+Separate the variables associated with Step 1.  
+
+```{r, make_step_1_data}
+step_1_df <- df %>% select(xA, xB, x01:x06, response_1)
+```
+
+Separate the variables associated with the Option B classification formulation. Notice that the `outcome_2` variable is converted to a factor with a specific ordering of the levels. Use this ordering when modeling in `caret` to make sure everyone predicts the `Fail` class as the "positive" class in the confusion matrix.  
+
+```{r, make_step_2_option_b_data}
+step_2_b_df <- df %>% select(xA, xB, response_1, x07:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+Separate the variables associated with the Option A classification formulation. The `outcome_2` variable is again converted to a factor with a specific ordering of the levels.  
+
+```{r, make_step_2_option_a_data}
+step_2_a_df <- df %>% select(xA, xB, x01:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+# Part III: Binary classification Option B
+
+```{r}
+library(tidymodels)
+```
+
+```{r}
+library(Metrics)
+```
+
+## data split, train: 80%, test: 20%
+
+```{r}
+set.seed(123)
+data_split <- initial_split(step_2_b_df, prop = 0.8)
+
+train_data_b <- training(data_split)
+test_data_b  <- testing(data_split)
+```
+
+## 10 folds cross validation
+
+```{r}
+set.seed(345)
+folds_b <- vfold_cv(train_data_b, v = 10)
+folds_b
+```
+
+## Logistic regression with additive terms
+
+### fit
+
+```{r}
+set.seed(57974)
+logit_fit <-
+  logistic_reg() %>%
+  set_mode("classification") %>% 
+  set_engine("glm")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+logit_fit
+```
+
+### preprocess with recipe
+
+```{r}
+set.seed(234)
+logit_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_ns(x07, deg_free = tune("x07")) %>%
+  step_ns(x08, deg_free = tune("x08"))
+```
+
+```{r}
+logit_spec <- logistic_reg() %>% 
+  set_engine("glm")
+```
+
+```{r}
+logit_wf <- 
+  workflow() %>%
+  add_model(logit_spec) %>%
+  add_recipe(logit_rec)
+```
+
+```{r}
+logit_grid <- expand.grid(x07 = 1:5, x08 = 1:5)
+```
+
+### resmaple and tune
+
+```{r}
+logit_tune <- tune_grid(
+  logit_wf,
+  resamples = folds_b,
+  grid = logit_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(logit_tune)
+```
+```{r}
+autoplot(logit_tune)
+```
+
+
+### best parameter
+
+```{r}
+best_logit <- logit_tune  %>%
+  select_best("roc_auc")
+best_logit
+```
+
+### Last fit model with best parameter
+
+```{r}
+logit_wf_final <- 
+  logit_wf %>%
+  finalize_workflow(best_logit) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+logit_last_fit <- last_fit(
+  logit_wf_final,
+  data_split
+)
+
+collect_metrics(logit_last_fit)
+```
+```{r}
+logit_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+logit_auc <- 
+  logit_last_fit %>% 
+  collect_predictions(parameters = best_logit) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "Logistic Regression")
+```
+
+## Regularized regression with Elastic net
+
+### fit
+
+```{r}
+set.seed(57974)
+glmnet_fit <-
+  logistic_reg() %>%
+  set_mode("classification") %>% 
+  set_engine("glmnet")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+glmnet_fit
+```
+
+### preprocess with recipe
+
+```{r}
+set.seed(234)
+glmnet_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric())
+```
+
+```{r}
+glmnet_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+```
+
+```{r}
+glmnet_grid <- glmnet_spec %>%
+  parameters() %>%
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+glmnet_wf <- 
+  workflow() %>%
+  add_model(glmnet_spec) %>%
+  add_recipe(glmnet_rec)
+```
+
+### resample and tune
+
+```{r}
+glmnet_tune <- tune_grid(
+  glmnet_wf,
+  resamples = folds_b,
+  grid = glmnet_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(glmnet_tune)
+```
+
+```{r}
+autoplot(glmnet_tune)
+```
+
+### best parameter
+
+```{r}
+best_glmnet <- glmnet_tune  %>%
+  select_best("roc_auc")
+best_glmnet
+```
+
+### Last fit model with best parameters
+
+```{r}
+glmnet_wf_final <- 
+  glmnet_wf %>%
+  finalize_workflow(best_glmnet) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+glmnet_last_fit <- last_fit(
+  glmnet_wf_final,
+  data_split
+)
+
+collect_metrics(glmnet_last_fit)
+```
+```{r}
+glmnet_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+glmnet_auc <- 
+  glmnet_last_fit %>% 
+  collect_predictions(parameters = best_glmnet) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "glmnet")
+```
+
+### pair interaction
+
+```{r}
+set.seed(234)
+glmnet_rec_2 <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_interact(terms = outcome_2 ~ (.)^2)
+```
+
+```{r}
+glmnet_spec_2 <- logistic_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+```
+
+```{r}
+glmnet_grid_2 <- glmnet_spec_2 %>%
+  parameters() %>%
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+glmnet_wf_2 <- 
+  workflow() %>%
+  add_model(glmnet_spec_2) %>%
+  add_recipe(glmnet_rec_2)
+```
+
+```{r}
+glmnet_tune_2 <- tune_grid(
+  glmnet_wf_2,
+  resamples = folds_b,
+  grid = glmnet_grid_2
+)
+```
+
+```{r}
+collect_metrics(glmnet_tune_2)
+```
+
+```{r}
+best_glmnet_2 <- glmnet_tune_2  %>%
+  select_best("roc_auc")
+best_glmnet_2
+```
+
+### Last fit model with best penalty
+
+```{r}
+glmnet_wf_final_2 <- 
+  glmnet_wf_2 %>%
+  finalize_workflow(best_glmnet_2) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+glmnet_last_fit_2 <- last_fit(
+  glmnet_wf_final_2,
+  data_split
+)
+
+collect_metrics(glmnet_last_fit_2)
+```
+### triple interaction
+
+```{r}
+set.seed(334)
+glmnet_rec_3 <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_interact(terms = outcome_2 ~ (.)^3)
+```
+
+```{r}
+glmnet_spec_3 <- logistic_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+```
+
+```{r}
+glmnet_grid_3 <- glmnet_spec_3 %>%
+  parameters() %>%
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+glmnet_wf_3 <- 
+  workflow() %>%
+  add_model(glmnet_spec_3) %>%
+  add_recipe(glmnet_rec_3)
+```
+
+```{r}
+glmnet_tune_3 <- tune_grid(
+  glmnet_wf_3,
+  resamples = folds_b,
+  grid = glmnet_grid_3
+)
+```
+
+```{r}
+collect_metrics(glmnet_tune_3)
+```
+
+```{r}
+best_glmnet_3 <- glmnet_tune_3  %>%
+  select_best("roc_auc")
+best_glmnet_3
+```
+
+### Last fit model with best parameter
+
+```{r}
+glmnet_wf_final_3 <- 
+  glmnet_wf_3 %>%
+  finalize_workflow(best_glmnet_3) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+glmnet_last_fit_3 <- last_fit(
+  glmnet_wf_final_3,
+  data_split
+)
+
+collect_metrics(glmnet_last_fit_3)
+```
+```{r}
+metric_glmnet <- rbind (collect_metrics(glmnet_last_fit),collect_metrics(glmnet_last_fit_2),collect_metrics(glmnet_last_fit_3))
+metric_glmnet
+```
+According to result, pair interactions has higher roc_auc while triple has higher accuracy.
+
+## Neural network
+
+```{r}
+library(keras)
+```
+
+```{r, warning=FALSE}
+library(tensorflow)
+```
+
+```{r, warning=FALSE}
+set.seed(57974)
+nnet_fit <-
+  mlp() %>%
+  set_mode("classification") %>% 
+  set_engine("keras")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+nnet_fit
+```
+
+### preprocess with recipe
+
+```{r}
+set.seed(234)
+nnet_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric())
+```
+
+```{r}
+nnet_spec <- mlp(hidden_units = tune(), penalty = tune(), activation = "relu") %>% 
+  set_engine("keras")%>% 
+  set_mode("classification")
+```
+
+```{r}
+nnet_grid <- nnet_spec %>%
+  parameters() %>%
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+nnet_wf <- 
+  workflow() %>%
+  add_model(nnet_spec) %>%
+  add_recipe(nnet_rec)
+```
+
+### resmaple and tune
+
+```{r}
+nnet_tune <- tune_grid(
+  nnet_wf,
+  resamples = folds_b,
+  grid = nnet_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(nnet_tune)
+```
+
+```{r}
+autoplot(nnet_tune)
+```
+
+### best parameter
+
+```{r}
+best_nnet <- nnet_tune  %>%
+  select_best("roc_auc")
+best_nnet
+```
+
+### Last fit model with best parameter
+
+```{r}
+nnet_wf_final <- 
+  nnet_wf %>%
+  finalize_workflow(best_nnet) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+nnet_last_fit <- last_fit(
+  nnet_wf_final,
+  data_split
+)
+
+collect_metrics(nnet_last_fit)
+```
+
+```{r}
+nnet_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+nnet_auc <- 
+  nnet_last_fit %>% 
+  collect_predictions(parameters = best_nnet) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "Neural Network")
+```
+
+## Random Forest
+
+```{r}
+library(ranger)
+```
+
+### fit
+
+```{r}
+set.seed(57974)
+rf_fit <-
+  rand_forest() %>%
+  set_mode("classification") %>% 
+  set_engine("ranger")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+rf_fit
+```
+
+### preprocess with recipe
+
+```{r}
+set.seed(234)
+rf_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) 
+```
+
+```{r}
+rf_spec <- rand_forest(mtry = tune(), trees = tune()) %>% 
+  set_engine("ranger")%>% 
+  set_mode("classification")
+```
+
+```{r}
+rf_grid <- rf_spec %>%
+  parameters() %>%
+  finalize(select(train_data_b, -outcome_2)) %>% 
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+rf_wf <- 
+  workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(rf_rec)
+```
+
+### resample and tune
+
+```{r}
+rf_tune <- tune_grid(
+  rf_wf,
+  resamples = folds_b,
+  grid = rf_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(rf_tune) 
+```
+
+```{r}
+autoplot(rf_tune)
+```
+
+### best parameter
+
+```{r}
+best_rf <- rf_tune  %>%
+  select_best("roc_auc")
+```
+
+### Last fit model with best parameter
+
+```{r}
+rf_wf_final <- 
+  rf_wf %>%
+  finalize_workflow(best_rf) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+rf_last_fit <- last_fit(
+  rf_wf_final,
+  data_split
+)
+
+collect_metrics(rf_last_fit)
+```
+
+```{r}
+rf_tune %>% 
+  collect_predictions()
+```
+
+```{r}
+rf_last_fit %>% 
+  collect_predictions()
+```
+```{r}
+rf_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+rf_auc <- 
+  rf_last_fit %>% 
+  collect_predictions(parameters = best_rf) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "Random Forest")
+```
+
+## Gradient boosted tree
+
+```{r,warning=FALSE}
+library(xgboost)
+```
+
+### fit
+
+```{r}
+set.seed(57974)
+boost_fit <-
+  boost_tree() %>%
+  set_mode("classification") %>% 
+  set_engine("xgboost")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+boost_fit
+```
+### preprocess with ricpe
+
+```{r}
+set.seed(234)
+boost_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) 
+```
+
+```{r}
+boost_spec <- boost_tree(mtry = tune(), tree = tune(),
+                         learn_rate = tune(), tree_depth = tune()) %>% 
+  set_engine("xgboost")%>% 
+  set_mode("classification")
+```
+
+```{r}
+boost_grid <- boost_spec %>%
+  parameters() %>%
+  finalize(select(train_data_b, -outcome_2)) %>% 
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+boost_wf <- 
+  workflow() %>%
+  add_model(boost_spec) %>%
+  add_recipe(boost_rec)
+```
+
+### resample and tune
+
+```{r}
+boost_tune <- tune_grid(
+  boost_wf,
+  resamples = folds_b,
+  grid = boost_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(boost_tune) 
+```
+
+```{r}
+autoplot(boost_tune)
+```
+
+### best parameter
+
+```{r}
+best_boost <- boost_tune  %>%
+  select_best("roc_auc")
+```
+
+
+### Last fit model with best parameter
+
+```{r}
+boost_wf_final <- 
+  boost_wf %>%
+  finalize_workflow(best_boost) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+boost_last_fit <- last_fit(
+  boost_wf_final,
+  data_split
+)
+
+collect_metrics(boost_last_fit)
+```
+
+```{r}
+boost_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+boost_auc <- 
+  boost_last_fit %>% 
+  collect_predictions(parameters = best_boost) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "XGBoost")
+```
+
+## SVM
+
+```{r,warning=FALSE}
+library(kernlab)
+```
+
+### fit
+
+```{r}
+set.seed(57974)
+svm_fit <-
+  svm_rbf() %>%
+  set_mode("classification") %>% 
+  set_engine("kernlab")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+svm_fit
+```
+
+### preprocess with recipe
+
+```{r}
+set.seed(234)
+svm_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) 
+```
+
+```{r}
+svm_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>% 
+  set_engine("kernlab")%>% 
+  set_mode("classification")
+```
+
+```{r}
+svm_grid <- svm_spec %>%
+  parameters() %>% 
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+svm_wf <- 
+  workflow() %>%
+  add_model(svm_spec) %>%
+  add_recipe(svm_rec)
+```
+
+### resample and tune
+
+```{r}
+svm_tune <- tune_grid(
+  svm_wf,
+  resamples = folds_b,
+  grid = svm_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(svm_tune) 
+```
+
+```{r}
+autoplot(svm_tune)
+```
+
+### best parameter
+
+```{r}
+best_svm <- svm_tune  %>%
+  select_best("roc_auc")
+```
+
+### Last fit model with best parameter
+
+```{r}
+svm_wf_final <- 
+  svm_wf %>%
+  finalize_workflow(best_svm) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+svm_last_fit <- last_fit(
+  svm_wf_final,
+  data_split
+)
+
+collect_metrics(svm_last_fit)
+```
+
+```{r}
+svm_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+svm_auc <- 
+  svm_last_fit %>% 
+  collect_predictions(parameters = best_svm) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "svm")
+```
+
+## KNN
+
+```{r,warning=FALSE}
+library(kknn)
+```
+
+### fit
+
+```{r}
+set.seed(57974)
+knn_fit <-
+  nearest_neighbor() %>%
+  set_mode("classification") %>% 
+  set_engine("kknn")%>%
+  fit(outcome_2 ~ ., data = train_data_b)
+knn_fit
+```
+
+###  preprocess with recipe
+
+```{r}
+set.seed(234)
+knn_rec <- recipe(outcome_2 ~ ., data = train_data_b)%>%
+  step_dummy(xA,xB)%>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) 
+```
+
+```{r}
+knn_spec <- nearest_neighbor(neighbors = tune(), weight_func = tune(), dist_power = tune()) %>% 
+  set_engine("kknn")%>% 
+  set_mode("classification")
+```
+
+```{r}
+knn_grid <- knn_spec %>%
+  parameters() %>%
+  finalize(select(train_data_b, -outcome_2)) %>% 
+  grid_max_entropy(size = 10)
+```
+
+```{r}
+knn_wf <- 
+  workflow() %>%
+  add_model(knn_spec) %>%
+  add_recipe(knn_rec)
+```
+
+### resample and tune
+
+```{r}
+knn_tune <- tune_grid(
+  knn_wf,
+  resamples = folds_b,
+  grid = knn_grid,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+collect_metrics(knn_tune) 
+```
+
+```{r}
+autoplot(knn_tune)
+```
+
+### best parameter
+
+```{r}
+best_knn <- knn_tune  %>%
+  select_best("roc_auc")
+```
+
+### Last fit model with best parameter
+
+```{r}
+knn_wf_final <- 
+  knn_wf %>%
+  finalize_workflow(best_knn) %>%
+  fit(data = train_data_b)
+```
+
+```{r}
+knn_last_fit <- last_fit(
+  knn_wf_final,
+  data_split
+)
+
+collect_metrics(knn_last_fit)
+```
+```{r}
+knn_last_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+knn_auc <- 
+  knn_last_fit %>% 
+  collect_predictions(parameters = best_knn) %>% 
+  roc_curve(outcome_2, .pred_Fail) %>% 
+  mutate(model = "knn")
+```
+
+### Final results of seven models
+
+```{r}
+metric <- rbind(collect_metrics(logit_last_fit),
+      collect_metrics(glmnet_last_fit),
+      collect_metrics(nnet_last_fit),
+      collect_metrics(rf_last_fit),
+      collect_metrics(boost_last_fit),
+      collect_metrics(svm_last_fit),
+      collect_metrics(knn_last_fit)
+      )
+metric
+```
+
+```{r}
+name_model <- data.frame("Model" = c("logit","logit","glmnet","glmnet","nnet","nnet","rf","rf","boost","boost","svm","svm","knn","knn"))
+```
+
+```{r}
+result <- cbind(name_model, metric)
+result 
+```
+
+```{r}
+bind_rows(rf_auc, logit_auc, glmnet_auc,nnet_auc,rf_auc,boost_auc,svm_auc,knn_auc) %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+```
+
+According to roc_auc and accuracy, XGboost is best model. 
+
+```{r}
+boost_last_fit %>% readr::write_rds("xgboost_b.rds")
+```
+
+```{r, load_back_the_model}
+boost_b <- readr::read_rds("xgboost_b.rds")
+```
+
